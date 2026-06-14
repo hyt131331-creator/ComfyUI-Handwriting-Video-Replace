@@ -1,81 +1,117 @@
 from __future__ import annotations
 
-import importlib.util
-import shutil
-import subprocess
 import tempfile
+import traceback
 from pathlib import Path
 
 
-class RunningHubEnvCheck:
+NODE_DIR = Path(__file__).resolve().parent
+TEMPLATE_VIDEO = NODE_DIR / "templates" / "fixed_template.mp4"
+
+
+class HandwritingVideoReplace:
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "run_check": ("BOOLEAN", {"default": True}),
+                "line_one": ("STRING", {"default": "嘻嘻嘻", "multiline": False}),
+                "line_two": ("STRING", {"default": "20060804", "multiline": False}),
+                "font_size": ("INT", {"default": 36, "min": 12, "max": 160, "step": 1}),
+                "font_color": ("STRING", {"default": "#000000", "multiline": False}),
+                "max_seconds": ("FLOAT", {"default": 23.0, "min": 1.0, "max": 300.0, "step": 0.001}),
+                "text_seconds": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 300.0, "step": 0.001}),
+                "fade_seconds": ("FLOAT", {"default": 0.12, "min": 0.0, "max": 2.0, "step": 0.001}),
+                "output_fps": ("FLOAT", {"default": 60.0, "min": 8.0, "max": 60.0, "step": 1.0}),
+                "text_position": (["bottom-center", "center", "top-center"], {"default": "bottom-center"}),
             }
         }
 
     RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("video_path",)
+    FUNCTION = "generate"
+    CATEGORY = "Video/Handwriting"
+    OUTPUT_NODE = True
+
+    def generate(
+        self,
+        line_one: str,
+        line_two: str,
+        font_size: int,
+        font_color: str,
+        max_seconds: float,
+        text_seconds: float,
+        fade_seconds: float,
+        output_fps: float,
+        text_position: str,
+    ):
+        try:
+            if not TEMPLATE_VIDEO.is_file():
+                raise FileNotFoundError(f"Template video not found: {TEMPLATE_VIDEO}")
+
+            from .renderer import RenderOptions, render_video
+
+            output_dir = Path(tempfile.gettempdir()) / "comfyui_handwriting_video_outputs"
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            options = RenderOptions(
+                line_one=line_one,
+                line_two=line_two,
+                text_position=text_position,
+                font_size=int(font_size),
+                font_color=font_color or "#000000",
+                tracking_mode="paper_track",
+                max_seconds=float(max_seconds),
+                text_seconds=float(text_seconds),
+                fade_seconds=float(fade_seconds),
+                output_fps=float(output_fps),
+            )
+            output_path = render_video(TEMPLATE_VIDEO, output_dir, options)
+            return (str(output_path),)
+        except Exception as exc:
+            detail = traceback.format_exc()
+            raise RuntimeError(f"HandwritingVideoReplace failed: {exc}\n{detail}") from exc
+
+
+class HandwritingVideoEnvCheck:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"run_check": ("BOOLEAN", {"default": True})}}
+
+    RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("report",)
     FUNCTION = "check"
-    CATEGORY = "RunningHub/Test"
+    CATEGORY = "Video/Handwriting"
 
     def check(self, run_check: bool):
         if not run_check:
             return ("check skipped",)
 
         lines = []
-        lines.append("RunningHub custom node environment check")
-        lines.append("")
-
-        for package_name in ("cv2", "PIL", "numpy"):
-            spec = importlib.util.find_spec(package_name)
-            lines.append(f"{package_name}: {'OK' if spec else 'MISSING'}")
-
-        ffmpeg_path = shutil.which("ffmpeg")
-        lines.append(f"ffmpeg in PATH: {ffmpeg_path or 'MISSING'}")
-        if ffmpeg_path:
+        for package_name in ("cv2", "PIL", "numpy", "imageio_ffmpeg"):
             try:
-                result = subprocess.run(
-                    [ffmpeg_path, "-version"],
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                )
-                first_line = (result.stdout or result.stderr).splitlines()[0]
-                lines.append(f"ffmpeg version: {first_line}")
+                __import__(package_name)
+                lines.append(f"{package_name}: OK")
             except Exception as exc:
-                lines.append(f"ffmpeg version check failed: {exc}")
+                lines.append(f"{package_name}: FAILED ({exc})")
 
         try:
-            with tempfile.TemporaryDirectory(prefix="rh_node_check_") as temp_dir:
-                test_path = Path(temp_dir) / "write_test.txt"
-                test_path.write_text("ok", encoding="utf-8")
-                lines.append(f"temp write: OK ({test_path.read_text(encoding='utf-8')})")
+            from .renderer import _mux_audio_if_possible  # noqa: F401
+
+            lines.append("renderer import: OK")
         except Exception as exc:
-            lines.append(f"temp write: FAILED ({exc})")
+            lines.append(f"renderer import: FAILED ({exc})")
 
-        try:
-            import cv2
-            import numpy as np
-            from PIL import Image, ImageDraw, ImageFont
-
-            image = Image.new("RGB", (320, 180), "white")
-            draw = ImageDraw.Draw(image)
-            draw.text((20, 70), "RunningHub OK", fill="black", font=ImageFont.load_default())
-            frame = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-            lines.append(f"opencv/pillow render: OK ({frame.shape[1]}x{frame.shape[0]})")
-        except Exception as exc:
-            lines.append(f"opencv/pillow render: FAILED ({exc})")
-
+        lines.append(f"template video: {'OK' if TEMPLATE_VIDEO.is_file() else 'MISSING'}")
+        lines.append(f"template path: {TEMPLATE_VIDEO}")
         return ("\n".join(lines),)
 
 
 NODE_CLASS_MAPPINGS = {
-    "RunningHubEnvCheck": RunningHubEnvCheck,
+    "HandwritingVideoReplace": HandwritingVideoReplace,
+    "HandwritingVideoEnvCheck": HandwritingVideoEnvCheck,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "RunningHubEnvCheck": "RunningHub Env Check",
+    "HandwritingVideoReplace": "Handwriting Video Replace",
+    "HandwritingVideoEnvCheck": "Handwriting Video Env Check",
 }
